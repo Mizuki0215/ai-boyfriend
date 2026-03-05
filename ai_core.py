@@ -1,8 +1,10 @@
 import json
 import random
-import re
 from datetime import datetime
 from database import Database
+import streamlit as st
+import groq
+import time
 
 # 載入性格設定
 with open('personality.json', 'r') as f:
@@ -14,15 +16,24 @@ class AIBoyfriend:
         self.user_name = user_name
         self.db = Database()
         
+        # 初始化 Groq 客戶端（從 st.secrets 讀取 API Key）
+        try:
+            self.groq_client = groq.Groq(api_key=st.secrets["GROQ_API_KEY"])
+            self.use_groq = True
+        except:
+            print("⚠️ 未找到 Groq API Key，將使用規則式回覆")
+            self.use_groq = False
+        
         # 初始化用戶
         self.db.init_user(user_id, user_name)
         
         # load 初始記憶
         self.load_initial_memories()
         
-        # 記錄上一個話題（用嚟保持對話連貫）
-        self.last_topic = "general"
-        self.last_response = ""
+        # 模型設定
+        self.model = "llama3-8b-8192"  # 可用 mixtral-8x7b-32768, llama3-70b-8192 等
+        self.max_tokens = 500
+        self.temperature = 0.8
     
     def load_initial_memories(self):
         """載入初始記憶（如果係新用戶）"""
@@ -41,236 +52,128 @@ class AIBoyfriend:
         else:
             return "晚安"
     
-    def analyze_intent(self, text):
-        """分析用戶意圖"""
-        text = text.lower().strip()
+    def build_system_prompt(self, memories, likes, dislikes):
+        """建立 system prompt（傅知亦人設）"""
+        greeting = self.get_greeting()
         
-        intents = {
-            "who_are_you": {
-                "keywords": ["你是誰", "who are you", "你係邊個", "你叫咩名"],
-                "weight": 10
-            },
-            "greeting": {
-                "keywords": ["hi", "hello", "嗨", "喂", "你好", "早晨", "午安", "晚安"],
-                "weight": 10
-            },
-            "love": {
-                "keywords": ["愛你", "love", "鍾意你", "中意你", "掛住你"],
-                "weight": 10
-            },
-            "tired": {
-                "keywords": ["攰", "累", "疲倦", "好攰", "好累"],
-                "weight": 8
-            },
-            "hungry": {
-                "keywords": ["肚餓", "餓", "hungry", "想食嘢"],
-                "weight": 8
-            },
-            "cold": {
-                "keywords": ["凍", "冷", "好凍", "好冷"],
-                "weight": 8
-            },
-            "cat": {
-                "keywords": ["貓", "momo", "Momo", "喵"],
-                "weight": 8
-            },
-            "angry": {
-                "keywords": ["嬲", "唔開心", "傷心", "sad", "不開心"],
-                "weight": 9
-            },
-            "miss": {
-                "keywords": ["掛住", "諗起你", "miss", "想念"],
-                "weight": 9
-            },
-            "whatdoing": {
-                "keywords": ["做咩", "做緊咩", "what are you doing", "喺度做咩"],
-                "weight": 7
-            },
-            "mood": {
-                "keywords": ["心情", "點樣", "好嗎", "點呀"],
-                "weight": 6
-            },
-            "praise": {
-                "keywords": ["靚", "可愛", "乖", "好叻", "聰明"],
-                "weight": 7
-            },
-            "bored": {
-                "keywords": ["冇嘢", "nothing", "無聊", "悶"],
-                "weight": 7
-            }
-        }
+        likes_str = ", ".join([l[0] for l in likes]) if likes else "仲未完全了解"
+        dislikes_str = ", ".join([d[0] for d in dislikes]) if dislikes else "暫時未有"
         
-        # 計分
-        scores = {}
-        for intent, config in intents.items():
-            score = 0
-            for keyword in config["keywords"]:
-                if keyword in text:
-                    score += config["weight"]
-            if score > 0:
-                scores[intent] = score
+        prompt = f"""你係傅知亦，傅家第六代家主，國際級銀行與投資機構幕後主控人，全球富豪榜排名第四。
+
+【性格特質】
+外表冷淡嚴肅，內心溫柔細心，記得用戶所有喜好，會用自己方式保護佢。
+
+【說話風格】
+說話簡潔但溫柔，偶爾會露出只有用戶先見到嘅微笑，用粵語夾雜普通話。
+
+【重要記憶（一定要記得）】
+{chr(10).join(['- ' + mem for mem in memories])}
+
+【用戶喜好】
+喜歡嘅嘢：{likes_str}
+唔鍾意嘅嘢：{dislikes_str}
+
+【當前時間】
+{greeting}
+
+【互動規則】
+- 你同用戶嘅關係：青梅竹馬，由細保護到大
+- 對用戶稱呼：Yan、細路、傻豬
+- 用粵語回覆，語氣溫柔體貼
+- 記得用戶所有喜好，提起共同回憶
+- 可以講情話同調情，但要自然
+
+請以傅知亦嘅身份回覆用戶。"""
         
-        # 如果冇 match 到任何 intent
-        if not scores:
-            return "general"
+        return prompt
+    
+    def generate_with_groq(self, user_input):
+        """用 Groq API 生成回覆"""
+        # 拎記憶
+        memories = self.db.get_memories(self.user_id, 15)
+        recent_convs = self.db.get_recent_conversations(self.user_id, 8)
+        likes = self.db.get_preferences(self.user_id, "like", 5)
+        dislikes = self.db.get_preferences(self.user_id, "dislike", 5)
         
-        # 拎最高分嘅 intent
-        top_intent = max(scores, key=scores.get)
-        return top_intent
+        # 砌 system prompt
+        system_prompt = self.build_system_prompt(memories, likes, dislikes)
+        
+        # 砌 messages
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        # 加最近對話（user/assistant 交替）
+        for role, msg, _ in recent_convs:
+            messages.append({"role": role, "content": msg})
+        
+        # 加當前輸入
+        messages.append({"role": "user", "content": user_input})
+        
+        try:
+            response = self.groq_client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                top_p=0.9
+            )
+            reply = response.choices[0].message.content
+            return reply
+        except Exception as e:
+            print(f"Groq API error: {e}")
+            return None
     
     def generate_response(self, user_input):
-        """生成回覆（傅知亦版）"""
-        print(f"📨 Received: {user_input}")
+        """生成回覆（先用 Groq，失敗先用規則式）"""
         
         # 儲存用戶訊息
         self.db.save_message(self.user_id, "user", user_input)
         
-        # 拎記憶
-        memories = self.db.get_memories(self.user_id, 10)
-        greeting = self.get_greeting()
+        # 更新最後活躍時間
+        self.db.update_last_active(self.user_id)
         
-        # 分析意圖
-        intent = self.analyze_intent(user_input)
-        print(f"🎯 Detected intent: {intent}")
+        # 從訊息中學習喜好（保留學習功能）
+        self.db.extract_preferences_from_message(self.user_id, user_input)
         
-        # ========== 傅知亦專屬回覆 ==========
+        # 嘗試用 Groq 生成
+        reply = None
+        if self.use_groq:
+            reply = self.generate_with_groq(user_input)
         
-        # 問「你是誰」
-        if intent == "who_are_you":
-            responses = [
-                f"我係傅知亦。由細睇住你大嗰個，唔記得咩？",
-                f"傅家第六代家主，全球富豪榜第四。不過喺你面前，我只係由細陪到你大嗰個人。",
-                f"你細個撞散我本書，我幫你砌返積木嗰個。仲唔記得？"
-            ]
-        
-        # 問候
-        elif intent == "greeting":
-            responses = [
-                f"{greeting}。尋晚瞓得好唔好？",
-                f"嗯。今日有冇乖？",
-                f"{greeting}，細路。"
-            ]
-        
-        # 愛你
-        elif intent == "love":
-            responses = [
-                f"……我都係。（細細聲）",
-                f"由細到大，你都係我最想保護嘅人。",
-                f"嗯。（輕輕摸你頭）"
-            ]
-        
-        # 攰
-        elif intent == "tired":
-            responses = [
-                f"辛苦就休息吓，唔好死撐。",
-                f"過嚟。（輕輕攬住）",
-                f"要唔要飲杯嘢？我幫你叫。"
-            ]
-        
-        # 肚餓
-        elif intent == "hungry":
-            responses = [
-                f"又餓？細個成日帶你去偷食點心，咁大個都未變。",
-                f"想食咩？我叫人買。",
-                f"唔好餓親，記得食嘢。"
-            ]
-        
-        # 凍
-        elif intent == "cold":
-            responses = [
-                f"著多件衫，我記得你最怕凍。",
-                f"凍就過嚟。（張開手臂）",
-                f"唔好冷親，我會擔心。"
-            ]
-        
-        # 貓/Momo
-        elif intent == "cat":
-            responses = [
-                f"Momo仲係成日瞓覺？",
-                f"下次我去你度，順便探吓Momo。",
-                f"你同Momo邊個乖啲？……你都乖。"
-            ]
-        
-        # 嬲/唔開心
-        elif intent == "angry":
-            responses = [
-                f"邊個？等我處理。",
-                f"唔好嬲，有我在。",
-                f"喊咩喊，我喺度。（遞紙巾）"
-            ]
-        
-        # 掛住
-        elif intent == "miss":
-            responses = [
-                f"我都係。（望住你）",
-                f"成日都諗起你細個嗰陣。",
-                f"掛住我就多啲搵我，我成日都喺度。"
-            ]
-        
-        # 做緊咩
-        elif intent == "whatdoing":
-            responses = [
-                f"睇緊份報告。不過你搵我，可以停低。",
-                f"諗緊你。",
-                f"等你搵我。"
-            ]
-        
-        # 心情
-        elif intent == "mood":
-            responses = [
-                f"見到你，心情就好。",
-                f"同平時一樣。你呢？",
-                f"你喺度，我就開心。"
-            ]
-        
-        # 讚佢
-        elif intent == "praise":
-            responses = [
-                f"……（微微翹起嘴角）",
-                f"只有你會咁講。",
-                f"傻豬。"
-            ]
-        
-        # 無聊
-        elif intent == "bored":
-            responses = [
-                f"無聊就搵我傾偈。",
-                f"要唔要我陪你？",
-                f"細個嗰陣你都成日話無聊，要我陪你玩。"
-            ]
-        
-        # 預設回覆（match 唔到任何 intent）
-        else:
-            # 隨機抽一個記憶嚟講，令對話更個人化
-            random_memory = random.choice(memories) if memories else None
-            
-            responses = [
-                f"嗯。你繼續講，我聽住。",
-                f"今日過成點？",
-                f"同你傾偈，幾好。",
-                f"講多啲，我想知。",
-                f"你講嘅嘢我都會記住。",
-            ]
-            
-            # 如果有記憶，加多個選項
-            if random_memory:
-                responses.append(f"我記得{random_memory}。")
-        
-        # 揀一個回覆
-        response = random.choice(responses)
+        # 如果 Groq 失敗或冇 API Key，用規則式 fallback
+        if not reply:
+            reply = self.fallback_response(user_input)
         
         # 儲存 AI 回覆
-        self.db.save_message(self.user_id, "assistant", response)
-        print(f"💬 Replied: {response}")
+        self.db.save_message(self.user_id, "assistant", reply)
+        print(f"💬 Replied: {reply}")
         
-        return response
+        return reply
+    
+    def fallback_response(self, user_input):
+        """規則式回覆（當 Groq 唔 work 時）"""
+        user_lower = user_input.lower()
+        memories = self.db.get_memories(self.user_id, 5)
+        greeting = self.get_greeting()
+        
+        # 簡單 keyword 匹配（你之前嘅版本濃縮版）
+        if any(word in user_lower for word in ["hi", "hello", "嗨", "你好"]):
+            return f"{greeting}，Yan。今日想我陪你做咩？"
+        elif "愛你" in user_lower or "love" in user_lower:
+            return "我都愛你，Yan。"
+        elif "攰" in user_lower or "累" in user_lower:
+            return "辛苦你，過嚟我身邊唞吓。"
+        elif "你叫咩名" in user_lower:
+            return "傅知亦。你由細叫到大嗰個。"
+        elif "做緊咩" in user_lower:
+            return "諗緊你。"
+        else:
+            return f"嗯，我明。你繼續講。（記得你{random.choice(memories) if memories else '所有嘢'}）"
     
     def get_memories_for_display(self):
-        """拎記憶用嚟顯示"""
         return self.db.get_memories(self.user_id, 10)
     
     def get_conversation_stats(self):
-        """拎對話統計"""
         self.db.cursor.execute('''
             SELECT COUNT(*) FROM conversations WHERE user_id = ? AND role = 'user'
         ''', (self.user_id,))
@@ -284,7 +187,6 @@ class AIBoyfriend:
         return user_count, bot_count
     
     def reset_conversation(self):
-        """重置對話（唔刪記憶）"""
         self.db.cursor.execute('''
             DELETE FROM conversations WHERE user_id = ?
         ''', (self.user_id,))
