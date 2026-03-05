@@ -1,0 +1,7 @@
+echo "ai_boyfriend.db
+__pycache__/
+*.pyc
+.venv/
+ai_venv/
+.DS_Store
+*.log" > .gitignore
