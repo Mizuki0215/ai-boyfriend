@@ -15,14 +15,6 @@ st.markdown("""
     .stApp {
         background: linear-gradient(135deg, #1e1e2f 0%, #2a2a40 100%);
     }
-    /* 用戶頭像 */
-    .stChatMessage[data-testid="stChatMessage"]:has(div:contains("👤")) {
-        background-color: #4a4a6a;
-    }
-    /* AI 頭像 */
-    .stChatMessage[data-testid="stChatMessage"]:has(div:contains("傅")) {
-        background-color: #5a4a6a;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -49,11 +41,13 @@ if st.session_state.first_greeting and len(st.session_state.messages) == 0:
 
 # ========== 顯示對話記錄 ==========
 for msg in st.session_state.messages:
-    with st.chat_message(msg["role"], avatar="👤" if msg["role"]=="user" else "傅"):
+    # 用 emoji 代替中文字
+    avatar = "👤" if msg["role"] == "user" else "💼"
+    with st.chat_message(msg["role"], avatar=avatar):
         st.markdown(msg["content"])
         st.caption(msg.get("time", datetime.now()).strftime("%H:%M"))
 
-# ========== 輸入區（用 chat_input 確保穩定） ==========
+# ========== 輸入區 ==========
 if prompt := st.chat_input("想同我講咩？"):
     # 顯示用戶訊息
     st.session_state.messages.append({"role": "user", "content": prompt, "time": datetime.now()})
@@ -62,8 +56,8 @@ if prompt := st.chat_input("想同我講咩？"):
         st.markdown(prompt)
         st.caption(datetime.now().strftime("%H:%M"))
     
-    # 顯示 AI 回覆（用 spinner 表示正在輸入）
-    with st.chat_message("assistant", avatar="傅"):
+    # 顯示 AI 回覆
+    with st.chat_message("assistant", avatar="💼"):
         with st.spinner("傅知亦正在輸入..."):
             response = st.session_state.bf.generate_response(prompt)
         st.markdown(response)
