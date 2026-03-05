@@ -73,6 +73,7 @@ class AIBoyfriend:
         return prompt
 
     def generate_with_deepseek(self, user_input):
+        print("🔍 Attempting to call DeepSeek API...")
         memories = self.db.get_memories(self.user_id, 15)
         recent_convs = self.db.get_recent_conversations(self.user_id, 8)
         likes = self.db.get_preferences(self.user_id, "like", 5)
@@ -99,6 +100,7 @@ class AIBoyfriend:
             response = requests.post(self.api_url, headers=headers, json=data)
             response.raise_for_status()
             result = response.json()
+            print("✅ DeepSeek API call succeeded") 
             return result['choices'][0]['message']['content']
         except Exception as e:
             print(f"DeepSeek API error: {e}")
